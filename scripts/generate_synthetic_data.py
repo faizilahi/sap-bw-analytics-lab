@@ -1,23 +1,89 @@
-import numpy as np, pandas as pd
+"""Synthetic FI documents + FX curve with a mid-month EUR shift."""
+from __future__ import annotations
 from pathlib import Path
-RNG = np.random.default_rng(19)
-ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT/"data"; DATA.mkdir(parents=True, exist_ok=True)
-cos = pd.DataFrame({"company_code":["1000","2000","3000"],"company_name":["North Am Ops","EU Ops","APAC Ops"],"currency":["USD","EUR","JPY"]})
-fx = []
-for d in pd.date_range("2024-01-01","2024-01-31",freq="D"):
-  fx += [{"fx_date":d.date(),"currency":"USD","to_usd":1.0},
-         {"fx_date":d.date(),"currency":"EUR","to_usd":round(float(RNG.uniform(1.05,1.12)),4)},
-         {"fx_date":d.date(),"currency":"JPY","to_usd":round(float(RNG.uniform(0.0065,0.0072)),6)}]
-rows=[]
-accts=["400000","500000","600000"]
-for i in range(800):
-  c=cos.sample(1,random_state=int(RNG.integers(0,1e9))).iloc[0]
-  d=pd.Timestamp("2024-01-01")+pd.Timedelta(days=int(RNG.integers(0,31)))
-  rows.append({"doc_id":f"D{i+1:05d}","posting_date":d.date(),"company_code":c.company_code,
-    "gl_account":RNG.choice(accts),"amount_lc":round(float(RNG.normal(5000,2000)),2),"currency":c.currency})
-cos.to_csv(DATA/"infoobject_company.csv",index=False)
-pd.DataFrame(fx).to_csv(DATA/"fx_rates.csv",index=False)
-pd.DataFrame(rows).to_csv(DATA/"adso_fi_gl.csv",index=False)
-print("Wrote SAP BW synthetic extracts")
+import numpy as np
+import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "data"
+DATA.mkdir(parents=True, exist_ok=True)
+RNG = np.random.default_rng(1015)
+
+ACCOUNTS = [("400000", "COGS"), ("410000", "Revenue"), ("500000", "Opex"), ("160000", "AR")]
+
+def main():
+    fx = []
+    for d in pd.date_range("2024-10-01", "2024-10-31", freq="D"):
+        rate = 1.085 if d.day < 15 else 1.062
+        fx.append({"rate_date": d.strftime("%Y-%m-%d"), "from_ccy": "EUR", "to_ccy": "USD", "rate": rate})
+        fx.append({"rate_date": d.strftime("%Y-%m-%d"), "from_ccy": "USD", "to_ccy": "USD", "rate": 1.0})
+    fx_df = pd.DataFrame(fx)
+
+    docs = []
+    doc_num = 100000
+    # Plant exact DE01 EUR amounts so break is reproducible
+    # Early month DE01 EUR doc total chosen so * (1.085-1.062) = 38441.70
+    # => early EUR total = 38441.70 / 0.023 = 1,671,378.2609 ≈ 1671378.26
+    early_eur_target = 1671378.26
+    late_eur_target = 890000.00
+    us_usd_target = 1200000.00
+
+    def add_block(company, ccy, start, end, target, n):
+        nonlocal doc_num
+        days = pd.date_range(start, end, freq="D")
+        raw = []
+        for i in range(n):
+            d = days[i % len(days)]
+            acct, _ = ACCOUNTS[i % len(ACCOUNTS)]
+            amt = float(RNG.uniform(500, 8000))
+            raw.append((d, acct, amt))
+        scale = target / sum(a for _, _, a in raw)
+        for d, acct, amt in raw:
+            doc_num += 1
+            local = round(amt * scale, 2)
+            docs.append({
+                "doc_number": f"FI{doc_num}",
+                "company_code": company,
+                "gl_account": acct,
+                "posting_date": d.strftime("%Y-%m-%d"),
+                "doc_currency": ccy,
+                "amount_doc": local,
+                "local_currency": ccy,
+                "amount_local": local,
+            })
+
+    add_block("DE01", "EUR", "2024-10-01", "2024-10-14", early_eur_target, 420)
+    add_block("DE01", "EUR", "2024-10-15", "2024-10-31", late_eur_target, 380)
+    add_block("US01", "USD", "2024-10-01", "2024-10-31", us_usd_target, 448)
+
+    # fix penny on last of each block via regenerate totals check
+    df = pd.DataFrame(docs)
+    # Adjust last early DE01 row for exact early total
+    early_mask = (df.company_code == "DE01") & (df.posting_date < "2024-10-15")
+    drift = round(early_eur_target - df.loc[early_mask, "amount_doc"].sum(), 2)
+    idx = df.loc[early_mask].index[-1]
+    df.at[idx, "amount_doc"] = round(df.at[idx, "amount_doc"] + drift, 2)
+    df.at[idx, "amount_local"] = df.at[idx, "amount_doc"]
+
+    late_mask = (df.company_code == "DE01") & (df.posting_date >= "2024-10-15")
+    drift = round(late_eur_target - df.loc[late_mask, "amount_doc"].sum(), 2)
+    idx = df.loc[late_mask].index[-1]
+    df.at[idx, "amount_doc"] = round(df.at[idx, "amount_doc"] + drift, 2)
+    df.at[idx, "amount_local"] = df.at[idx, "amount_doc"]
+
+    us_mask = df.company_code == "US01"
+    drift = round(us_usd_target - df.loc[us_mask, "amount_doc"].sum(), 2)
+    idx = df.loc[us_mask].index[-1]
+    df.at[idx, "amount_doc"] = round(df.at[idx, "amount_doc"] + drift, 2)
+    df.at[idx, "amount_local"] = df.at[idx, "amount_doc"]
+
+    df.to_csv(DATA / "fi_documents.csv", index=False)
+    fx_df.to_csv(DATA / "fx_rates.csv", index=False)
+    pd.DataFrame([
+        {"company_code": "US01", "controlling_area": "CA_US", "co_ccy": "USD"},
+        {"company_code": "DE01", "controlling_area": "CA_US", "co_ccy": "USD"},
+    ]).to_csv(DATA / "company_code.csv", index=False)
+    print("FI docs", len(df), "early EUR", df.loc[early_mask, "amount_doc"].sum())
+
+if __name__ == "__main__":
+    main()

@@ -1,113 +1,39 @@
-# SAP BW/4HANA Analytics Lab (Synthetic Extracts)
+# FI/CO Extract: Currency Shift Before the Cube
 
-**Author:** [Faiz Elahi](https://github.com/faizilahi) (`faizilahi`) · **Type:** EDUCATIONAL LAB · **Synthetic data only**
+[Faiz Elahi](https://www.linkedin.com/in/faizilahi) — [pendataco.com](https://pendataco.com) — [github.com/faizilahi](https://github.com/faizilahi)
 
----
+Synthetic data only. No vendor-customer employment claim.
 
-## Educational disclaimer
+A BW-style extract of FI documents into an analytic cube disagreed with Controlling
+after a mid-month EUR→USD rate change. Company code `US01` posted in USD; `DE01`
+posted in EUR. The extractor kept document currency; the cube expected controlling
+area currency (USD) at the **posting-date** rate, not the **period-end** rate the
+first load used.
 
-This is an **educational portfolio lab**. Datasets are **synthetic**. It does **not** claim employment at a customer, hospital, bank, SAP shop, or Oracle estate. No real PHI/PII. No live cloud spend. No API keys required.
+## The extractor
 
----
+`src/extractor.py` mimics 0FI_GL_14-style lines: document number, company code,
+account, amount in doc currency, local currency, posting date. Seed data plants
+**1,248** documents across October 2024.
 
-## Problem statement
+## The currency shift
 
-Analytics engineers inherit SAP BW extract files (aDSO/InfoCube-shaped) and must land them into a modern mart with clear InfoObject-like keys, currency, and company-code control totals.
+On `2024-10-15` the synthetic ECB-style rate moves from **1.085** to **1.062**
+USD per EUR. Loading with period-end (1.062) understates USD COGS for early-month
+DE01 postings by **$38,441.69** versus posting-date conversion.
 
-**Domain focus:** Finance / industrial controlling
+## The cube grain
 
----
-
-## Why this tool (SAP BW/4HANA-style InfoProvider extracts (local))
-
-| Opaque BW dumps | Documented extract → mart pipeline |
-|---|---|
-| Mixed currencies | Explicit FX teaching table |
-| No audit grain | Company-code control totals |
-
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-  GEN[generate_synthetic_data.py]
-  DATA[data/*.csv]
-  RUN[run_lab.py]
-  OUT[output/*.csv]
-  CHART[generate_charts.py]
-  IMG[docs/images/*.png]
-  GEN --> DATA --> RUN --> OUT
-  OUT --> CHART --> IMG
-```
-
-See [`docs/architecture.md`](docs/architecture.md).
-
----
-
-## Dataset dictionary
-
-| File | Grain | Notes |
-|------|-------|-------|
-| `adso_fi_gl.csv` | Doc line | Company code, account, amount LC |
-| `infoobject_company.csv` | Company | Currency |
-| `fx_rates.csv` | Day×currency | To USD teaching |
-| `output/summary.csv` | Company | USD totals |
-
----
-
-## Prerequisites
-
-- Python 3.10+
-- Packages in `requirements.txt`
-
----
-
-## How to run
+Grain is `(company_code, gl_account, posting_date, doc_currency)` before FX, then
+`(company_code, gl_account, posting_date)` in controlling USD after FX. Collapsing
+currency too early double-counts cross-rate docs — `src/cube_builder.py` refuses
+that collapse and emits the break in `output/fx_break.csv`.
 
 ```powershell
-cd "sap-bw/4hana-analytics-lab-"
-python -m venv .venv
-.\\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python scripts/generate_synthetic_data.py
-python src/run_lab.py
-python scripts/generate_charts.py
+python src/run_bw_extract.py
 ```
 
-Inspect `output/summary.csv` and `docs/images/primary_metric.png`.
-
----
-
-## Local vs cloud (honest)
-
-**No SAP BW/4HANA or Datasphere tenant.** CSV extracts mimic aDSO open-hub / flat-file interfaces. Transforms run in pandas. Do not claim live SAP connectivity.
-
----
-
-## Results interpretation
-
-Open `output/` CSVs and the PNGs under `docs/images/`. Numbers are synthetic teaching fixtures — use them to explain grain, filters, and control totals, not as real business KPIs.
-
----
-
-## Limitations
-
-- Stand-in engines (DuckDB/SQLite/pandas) replace paid MPP/warehouses where noted.
-- Simplified schemas vs production SAP/Oracle/Hive estates.
-- Charts are matplotlib teaching visuals, not vendor BI embeds.
-
----
-
-## Exercises
-
-1. Add a cost-center InfoObject and slice margin.
-2. Break FX coverage for one day and detect with a test.
-3. Write a BW→Snowflake naming map in docs.
-
----
-
-## License / attribution
-
-Educational portfolio content by Faiz Elahi. Synthetic data for teaching only.
-
+Worked result: posting-date USD total **$3,958,625.54**, period-end USD total
+**$3,920,183.85**, break **$38,441.69**, cube rows at correct grain **220**.
